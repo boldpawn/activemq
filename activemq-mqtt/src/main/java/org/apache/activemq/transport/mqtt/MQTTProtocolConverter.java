@@ -106,7 +106,7 @@ public class MQTTProtocolConverter {
 
     private final ConcurrentMap<Integer, ResponseHandler> resposeHandlers = new ConcurrentHashMap<Integer, ResponseHandler>();
     private final Map<String, ActiveMQDestination> activeMQDestinationMap = new LRUCache<String, ActiveMQDestination>(DEFAULT_CACHE_SIZE);
-    private final Map<Destination, String> mqttTopicMap = new LRUCache<Destination, String>(DEFAULT_CACHE_SIZE);
+    private final Map<ActiveMQDestination, String> mqttTopicMap = new LRUCache<ActiveMQDestination, String>(DEFAULT_CACHE_SIZE);
 
     private final Map<Short, MessageAck> consumerAcks = new LRUCache<Short, MessageAck>(DEFAULT_CACHE_SIZE);
     private final Map<Short, PUBREC> publisherRecs = new LRUCache<Short, PUBREC>(DEFAULT_CACHE_SIZE);
@@ -550,7 +550,7 @@ public class MQTTProtocolConverter {
                 command.messageId(), clientId, connectionInfo.getConnectionId(), msg.getMessageId());
         msg.setTimestamp(System.currentTimeMillis());
         msg.setPriority((byte) Message.DEFAULT_PRIORITY);
-        msg.setPersistent(command.qos() != QoS.AT_MOST_ONCE && !command.retain());
+        msg.setPersistent(command.qos() != QoS.AT_MOST_ONCE);
         msg.setIntProperty(QOS_PROPERTY_NAME, command.qos().ordinal());
         if (command.retain()) {
             msg.setBooleanProperty(RetainedMessageSubscriptionRecoveryPolicy.RETAIN_PROPERTY, true);
@@ -594,11 +594,15 @@ public class MQTTProtocolConverter {
 
         String topicName;
         synchronized (mqttTopicMap) {
-            topicName = mqttTopicMap.get(message.getJMSDestination());
+            ActiveMQDestination destination = message.getDestination();
+            if (destination.isPattern() && message.getOriginalDestination() != null) {
+                destination = message.getOriginalDestination();
+            }
+            topicName = mqttTopicMap.get(destination);
             if (topicName == null) {
-                String amqTopicName = findSubscriptionStrategy().onSend(message.getDestination());
+                String amqTopicName = findSubscriptionStrategy().onSend(destination);
                 topicName = MQTTProtocolSupport.convertActiveMQToMQTT(amqTopicName);
-                mqttTopicMap.put(message.getJMSDestination(), topicName);
+                mqttTopicMap.put(destination, topicName);
             }
         }
         result.topicName(new UTF8Buffer(topicName));

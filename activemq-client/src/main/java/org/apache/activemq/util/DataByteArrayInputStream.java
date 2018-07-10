@@ -65,6 +65,8 @@ public final class DataByteArrayInputStream extends InputStream implements DataI
         return pos - offset;
     }
 
+    public int position() { return pos; }
+
     /**
      * @return the underlying data array
      */
@@ -224,7 +226,7 @@ public final class DataByteArrayInputStream extends InputStream implements DataI
     }
 
     public long readLong() throws IOException {
-        if (pos >= buf.length ) {
+        if (pos + 8 > buf.length ) {
             throw new EOFException();
         }
         long rc = ((long)buf[pos++] << 56) + ((long)(buf[pos++] & 255) << 48) + ((long)(buf[pos++] & 255) << 40) + ((long)(buf[pos++] & 255) << 32);
@@ -259,62 +261,12 @@ public final class DataByteArrayInputStream extends InputStream implements DataI
 
     public String readUTF() throws IOException {
         int length = readUnsignedShort();
-        char[] characters = new char[length];
-        int c;
-        int c2;
-        int c3;
-        int count = 0;
-        int total = pos + length;
-        while (pos < total) {
-            c = (int)buf[pos] & 0xff;
-            if (c > 127) {
-                break;
-            }
-            pos++;
-            characters[count++] = (char)c;
+        if (pos + length > buf.length) {
+            throw new UTFDataFormatException("bad string");
         }
-        while (pos < total) {
-            c = (int)buf[pos] & 0xff;
-            switch (c >> 4) {
-            case 0:
-            case 1:
-            case 2:
-            case 3:
-            case 4:
-            case 5:
-            case 6:
-            case 7:
-                pos++;
-                characters[count++] = (char)c;
-                break;
-            case 12:
-            case 13:
-                pos += 2;
-                if (pos > total) {
-                    throw new UTFDataFormatException("bad string");
-                }
-                c2 = (int)buf[pos - 1];
-                if ((c2 & 0xC0) != 0x80) {
-                    throw new UTFDataFormatException("bad string");
-                }
-                characters[count++] = (char)(((c & 0x1F) << 6) | (c2 & 0x3F));
-                break;
-            case 14:
-                pos += 3;
-                if (pos > total) {
-                    throw new UTFDataFormatException("bad string");
-                }
-                c2 = (int)buf[pos - 2];
-                c3 = (int)buf[pos - 1];
-                if (((c2 & 0xC0) != 0x80) || ((c3 & 0xC0) != 0x80)) {
-                    throw new UTFDataFormatException("bad string");
-                }
-                characters[count++] = (char)(((c & 0x0F) << 12) | ((c2 & 0x3F) << 6) | ((c3 & 0x3F) << 0));
-                break;
-            default:
-                throw new UTFDataFormatException("bad string");
-            }
-        }
-        return new String(characters, 0, count);
+        char chararr[] = new char[length];
+        String result = MarshallingSupport.convertUTF8WithBuf(buf, chararr, pos, length);
+        pos += length;
+        return result;
     }
 }

@@ -29,6 +29,11 @@ import org.apache.activemq.command.ConsumerInfo;
 public class NetworkBridgeConfiguration {
 
     private boolean conduitSubscriptions = true;
+    /**
+     * Whether or not network subscriptions on queues are eligible to be conduit
+     * Default is false
+     */
+    private boolean conduitNetworkQueueSubscriptions;
     private boolean useVirtualDestSubs;
     private boolean dynamicOnly;
     private boolean syncDurableSubs;
@@ -54,6 +59,7 @@ public class NetworkBridgeConfiguration {
     private String password;
     private String destinationFilter = null;
     private String name = "NC";
+    private String clientIdToken = "_";
 
     protected List<ActiveMQDestination> excludedDestinations = new CopyOnWriteArrayList<ActiveMQDestination>();
     protected List<ActiveMQDestination> dynamicallyIncludedDestinations = new CopyOnWriteArrayList<ActiveMQDestination>();
@@ -72,6 +78,11 @@ public class NetworkBridgeConfiguration {
     private boolean checkDuplicateMessagesOnDuplex = false;
 
     /**
+     * Bridge factory implementation - by default backed by static factory, which is default implementation and will rely change.
+     */
+    private BridgeFactory bridgeFactory = NetworkBridgeFactory.INSTANCE;
+
+    /**
      * @return the conduitSubscriptions
      */
     public boolean isConduitSubscriptions() {
@@ -83,6 +94,14 @@ public class NetworkBridgeConfiguration {
      */
     public void setConduitSubscriptions(boolean conduitSubscriptions) {
         this.conduitSubscriptions = conduitSubscriptions;
+    }
+
+    public boolean isConduitNetworkQueueSubscriptions() {
+        return conduitNetworkQueueSubscriptions;
+    }
+
+    public void setConduitNetworkQueueSubscriptions(boolean conduitNetworkQueueSubscriptions) {
+        this.conduitNetworkQueueSubscriptions = conduitNetworkQueueSubscriptions;
     }
 
     /**
@@ -176,6 +195,14 @@ public class NetworkBridgeConfiguration {
      */
     public void setBrokerName(String brokerName) {
         this.brokerName = brokerName;
+    }
+
+    public String getClientIdToken() {
+        return clientIdToken;
+    }
+
+    public void setClientIdToken(String clientIdToken) {
+        this.clientIdToken = clientIdToken;
     }
 
     /**
@@ -517,6 +544,14 @@ public class NetworkBridgeConfiguration {
 
     public boolean isUseVirtualDestSubs() {
         return useVirtualDestSubs;
+    }
+
+    public BridgeFactory getBridgeFactory() {
+        return bridgeFactory;
+    }
+
+    public void setBridgeFactory(BridgeFactory bridgeFactory) {
+        this.bridgeFactory = bridgeFactory;
     }
 
     /**

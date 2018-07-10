@@ -480,6 +480,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         try {
             IOHelper.mkdirs(directory);
             if (deleteAllMessages) {
+                getJournal().setCheckForCorruptionOnStartup(false);
                 getJournal().start();
                 getJournal().delete();
                 getJournal().close();
@@ -670,17 +671,10 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         try {
 
             long start = System.currentTimeMillis();
-            Location afterProducerAudit = recoverProducerAudit();
-            Location afterAckMessageFile = recoverAckMessageFileMap();
+            boolean requiresJournalReplay = recoverProducerAudit();
+            requiresJournalReplay |= recoverAckMessageFileMap();
             Location lastIndoubtPosition = getRecoveryPosition();
-
-            if (afterProducerAudit != null && afterProducerAudit.equals(metadata.ackMessageFileMapLocation)) {
-                // valid checkpoint, possible recover from afterAckMessageFile
-                afterProducerAudit = null;
-            }
-            Location recoveryPosition = minimum(afterProducerAudit, afterAckMessageFile);
-            recoveryPosition = minimum(recoveryPosition, lastIndoubtPosition);
-
+            Location recoveryPosition = requiresJournalReplay ? journal.getNextLocation(null) : lastIndoubtPosition;
             if (recoveryPosition != null) {
                 int redoCounter = 0;
                 int dataFileRotationTracker = recoveryPosition.getDataFileId();
@@ -783,7 +777,8 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         return min;
     }
 
-    private Location recoverProducerAudit() throws IOException {
+    private boolean recoverProducerAudit() throws IOException {
+        boolean requiresReplay = true;
         if (metadata.producerSequenceIdTrackerLocation != null) {
             try {
                 KahaProducerAuditCommand audit = (KahaProducerAuditCommand) load(metadata.producerSequenceIdTrackerLocation);
@@ -793,33 +788,30 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                 metadata.producerSequenceIdTracker = (ActiveMQMessageAuditNoSync) objectIn.readObject();
                 metadata.producerSequenceIdTracker.setAuditDepth(maxAuditDepth);
                 metadata.producerSequenceIdTracker.setMaximumNumberOfProducersToTrack(maxNumProducers);
-                return getNextInitializedLocation(metadata.producerSequenceIdTrackerLocation);
+                requiresReplay = false;
             } catch (Exception e) {
                 LOG.warn("Cannot recover message audit", e);
-                return journal.getNextLocation(null);
             }
-        } else {
-            // got no audit stored so got to recreate via replay from start of the journal
-            return journal.getNextLocation(null);
         }
+        // got no audit stored so got to recreate via replay from start of the journal
+        return requiresReplay;
     }
 
     @SuppressWarnings("unchecked")
-    private Location recoverAckMessageFileMap() throws IOException {
+    private boolean recoverAckMessageFileMap() throws IOException {
+        boolean requiresReplay = true;
         if (metadata.ackMessageFileMapLocation != null) {
             try {
                 KahaAckMessageFileMapCommand audit = (KahaAckMessageFileMapCommand) load(metadata.ackMessageFileMapLocation);
                 ObjectInputStream objectIn = new ObjectInputStream(audit.getAckMessageFileMap().newInput());
                 metadata.ackMessageFileMap = (Map<Integer, Set<Integer>>) objectIn.readObject();
-                return getNextInitializedLocation(metadata.ackMessageFileMapLocation);
+                requiresReplay = false;
             } catch (Exception e) {
                 LOG.warn("Cannot recover ackMessageFileMap", e);
-                return journal.getNextLocation(null);
             }
-        } else {
-            // got no ackMessageFileMap stored so got to recreate via replay from start of the journal
-            return journal.getNextLocation(null);
         }
+        // got no ackMessageFileMap stored so got to recreate via replay from start of the journal
+        return requiresReplay;
     }
 
     protected void recoverIndex(Transaction tx) throws IOException {
@@ -1048,7 +1040,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
 
     private Location getNextInitializedLocation(Location location) throws IOException {
         Location mayNotBeInitialized = journal.getNextLocation(location);
-        if (location.getSize() == NOT_SET && mayNotBeInitialized.getSize() != NOT_SET) {
+        if (location.getSize() == NOT_SET && mayNotBeInitialized != null && mayNotBeInitialized.getSize() != NOT_SET) {
             // need to init size and type to skip
             return journal.getNextLocation(mayNotBeInitialized);
         } else {
@@ -1170,7 +1162,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             try {
                 is.close();
             } catch (IOException e) {}
-            throw new IOException("Could not load journal record. Invalid location: "+location);
+            throw new IOException("Could not load journal record, null type information from: " + readByte + " at location: "+location);
         }
         JournalCommand<?> message = (JournalCommand<?>)type.createMessage();
         message.mergeFramed(is);
@@ -1524,7 +1516,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                 decrementAndSubSizeToStoreStat(command.getDestination(), previousKeys.location.getSize());
 
                 //update all the subscription metrics
-                if (enableSubscriptionStatistics && location.getSize() != previousKeys.location.getSize()) {
+                if (enableSubscriptionStatistics && sd.ackPositions != null && location.getSize() != previousKeys.location.getSize()) {
                     Iterator<Entry<String, SequenceSet>> iter = sd.ackPositions.iterator(tx);
                     while (iter.hasNext()) {
                         Entry<String, SequenceSet> e = iter.next();
@@ -1701,6 +1693,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
                         return checkpointUpdate(tx, cleanup);
                     }
                 });
+                pageFile.flush();
                 // after the index update such that partial removal does not leave dangling references in the index.
                 journal.removeDataFiles(filesToGc);
             } finally {
@@ -1729,7 +1722,6 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         Location[] inProgressTxRange = getInProgressTxLocationRange();
         metadata.firstInProgressTransactionLocation = inProgressTxRange[0];
         tx.store(metadata.page, metadataMarshaller, true);
-        pageFile.flush();
 
         final TreeSet<Integer> gcCandidateSet = new TreeSet<>();
         if (cleanup) {
@@ -1742,7 +1734,8 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             }
 
             if (lastUpdate != null) {
-                gcCandidateSet.remove(lastUpdate.getDataFileId());
+                // we won't delete past the last update, ackCompaction journal can be a candidate in error
+                gcCandidateSet.removeAll(new TreeSet<Integer>(gcCandidateSet.tailSet(lastUpdate.getDataFileId())));
             }
 
             // Don't GC files under replication
@@ -2139,6 +2132,9 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
             Location location = store(new KahaProducerAuditCommand().setAudit(new Buffer(baos.toByteArray())), nullCompletionCallback);
             try {
                 location.getLatch().await();
+                if (location.getException().get() != null) {
+                    throw location.getException().get();
+                }
             } catch (InterruptedException e) {
                 throw new InterruptedIOException(e.toString());
             }
@@ -2970,33 +2966,38 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         return sd.subscriptionAcks.get(tx, subscriptionKey);
     }
 
-    public long getStoredMessageCount(Transaction tx, StoredDestination sd, String subscriptionKey) throws IOException {
-        SequenceSet messageSequences = sd.ackPositions.get(tx, subscriptionKey);
-        if (messageSequences != null) {
-            long result = messageSequences.rangeSize();
-            // if there's anything in the range the last value is always the nextMessage marker, so remove 1.
-            return result > 0 ? result - 1 : 0;
+    protected long getStoredMessageCount(Transaction tx, StoredDestination sd, String subscriptionKey) throws IOException {
+        if (sd.ackPositions != null) {
+            SequenceSet messageSequences = sd.ackPositions.get(tx, subscriptionKey);
+            if (messageSequences != null) {
+                long result = messageSequences.rangeSize();
+                // if there's anything in the range the last value is always the nextMessage marker, so remove 1.
+                return result > 0 ? result - 1 : 0;
+            }
         }
 
         return 0;
     }
 
-    public long getStoredMessageSize(Transaction tx, StoredDestination sd, String subscriptionKey) throws IOException {
-        //grab the messages attached to this subscription
-        SequenceSet messageSequences = sd.ackPositions.get(tx, subscriptionKey);
-
+    protected long getStoredMessageSize(Transaction tx, StoredDestination sd, String subscriptionKey) throws IOException {
         long locationSize = 0;
-        if (messageSequences != null) {
-            Sequence head = messageSequences.getHead();
-            if (head != null) {
-                //get an iterator over the order index starting at the first unacked message
-                //and go over each message to add up the size
-                Iterator<Entry<Long, MessageKeys>> iterator = sd.orderIndex.iterator(tx,
-                        new MessageOrderCursor(head.getFirst()));
 
-                while (iterator.hasNext()) {
-                    Entry<Long, MessageKeys> entry = iterator.next();
-                    locationSize += entry.getValue().location.getSize();
+        if (sd.ackPositions != null) {
+            //grab the messages attached to this subscription
+            SequenceSet messageSequences = sd.ackPositions.get(tx, subscriptionKey);
+
+            if (messageSequences != null) {
+                Sequence head = messageSequences.getHead();
+                if (head != null) {
+                    //get an iterator over the order index starting at the first unacked message
+                    //and go over each message to add up the size
+                    Iterator<Entry<Long, MessageKeys>> iterator = sd.orderIndex.iterator(tx,
+                            new MessageOrderCursor(head.getFirst()));
+
+                    while (iterator.hasNext()) {
+                        Entry<Long, MessageKeys> entry = iterator.next();
+                        locationSize += entry.getValue().location.getSize();
+                    }
                 }
             }
         }
@@ -3015,39 +3016,6 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
     private final LinkedHashMap<TransactionId, List<Operation>> inflightTransactions = new LinkedHashMap<>();
     @SuppressWarnings("rawtypes")
     protected final LinkedHashMap<TransactionId, List<Operation>> preparedTransactions = new LinkedHashMap<>();
-    protected final Set<String> ackedAndPrepared = new HashSet<>();
-    protected final Set<String> rolledBackAcks = new HashSet<>();
-
-    // messages that have prepared (pending) acks cannot be re-dispatched unless the outcome is rollback,
-    // till then they are skipped by the store.
-    // 'at most once' XA guarantee
-    public void trackRecoveredAcks(ArrayList<MessageAck> acks) {
-        this.indexLock.writeLock().lock();
-        try {
-            for (MessageAck ack : acks) {
-                ackedAndPrepared.add(ack.getLastMessageId().toProducerKey());
-            }
-        } finally {
-            this.indexLock.writeLock().unlock();
-        }
-    }
-
-    public void forgetRecoveredAcks(ArrayList<MessageAck> acks, boolean rollback) throws IOException {
-        if (acks != null) {
-            this.indexLock.writeLock().lock();
-            try {
-                for (MessageAck ack : acks) {
-                    final String id = ack.getLastMessageId().toProducerKey();
-                    ackedAndPrepared.remove(id);
-                    if (rollback) {
-                        rolledBackAcks.add(id);
-                    }
-                }
-            } finally {
-                this.indexLock.writeLock().unlock();
-            }
-        }
-    }
 
     @SuppressWarnings("rawtypes")
     private List<Operation> getInflightTx(KahaTransactionInfo info) {
@@ -3137,7 +3105,7 @@ public abstract class MessageDatabase extends ServiceSupport implements BrokerSe
         return index;
     }
 
-    private Journal createJournal() throws IOException {
+    protected Journal createJournal() throws IOException {
         Journal manager = new Journal();
         manager.setDirectory(directory);
         manager.setMaxFileLength(getJournalMaxFileLength());

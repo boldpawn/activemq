@@ -20,6 +20,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.ListIterator;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -79,7 +80,15 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
 
     @Override
     public void rebase() {
-        resetSize();
+        MessageId lastAdded = lastCachedIds[SYNC_ADD];
+        if (lastAdded != null) {
+            try {
+                setBatch(lastAdded);
+            } catch (Exception e) {
+                LOG.error("{} - Failed to set batch on rebase", this, e);
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     @Override
@@ -232,12 +241,6 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
     public synchronized boolean tryAddMessageLast(MessageReference node, long wait) throws Exception {
         boolean disableCache = false;
         if (hasSpace()) {
-            if (!isCacheEnabled() && size==0 && isStarted() && useCache) {
-                if (LOG.isTraceEnabled()) {
-                    LOG.trace("{} - enabling cache for empty store {} {}", this, node.getMessageId(), node.getMessageId().getFutureOrSequenceLong());
-                }
-                setCacheEnabled(true);
-            }
             if (isCacheEnabled()) {
                 if (recoverMessage(node.getMessage(),true)) {
                     trackLastCached(node);
@@ -261,41 +264,68 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
         return true;
     }
 
+    @Override
+    public synchronized boolean isCacheEnabled() {
+        return super.isCacheEnabled() || enableCacheNow();
+    }
+
+    protected boolean enableCacheNow() {
+        boolean result = false;
+        if (canEnableCash()) {
+            setCacheEnabled(true);
+            result = true;
+            if (LOG.isTraceEnabled()) {
+                LOG.trace("{} enabling cache on empty store", this);
+            }
+        }
+        return result;
+    }
+
+    protected boolean canEnableCash() {
+        return useCache && size==0 && hasSpace() && isStarted();
+    }
+
     private void syncWithStore(Message currentAdd) throws Exception {
         pruneLastCached();
-        if (lastCachedIds[SYNC_ADD] == null) {
-            // possibly only async adds, lets wait on the potential last add and reset from there
-            for (ListIterator<MessageId> it = pendingCachedIds.listIterator(pendingCachedIds.size()); it.hasPrevious(); ) {
-                MessageId lastPending = it.previous();
-                Object futureOrLong = lastPending.getFutureOrSequenceLong();
-                if (futureOrLong instanceof Future) {
-                    Future future = (Future) futureOrLong;
-                    if (future.isCancelled()) {
-                        continue;
-                    }
-                    try {
-                        future.get(5, TimeUnit.SECONDS);
-                        setLastCachedId(ASYNC_ADD, lastPending);
-                    } catch (CancellationException ok) {
-                        continue;
-                    } catch (TimeoutException potentialDeadlock) {
-                        LOG.debug("{} timed out waiting for async add", this, potentialDeadlock);
-                    } catch (Exception worstCaseWeReplay) {
-                        LOG.debug("{} exception waiting for async add", this, worstCaseWeReplay);
-                    }
-                } else {
+        for (ListIterator<MessageId> it = pendingCachedIds.listIterator(pendingCachedIds.size()); it.hasPrevious(); ) {
+            MessageId lastPending = it.previous();
+            Object futureOrLong = lastPending.getFutureOrSequenceLong();
+            if (futureOrLong instanceof Future) {
+                Future future = (Future) futureOrLong;
+                if (future.isCancelled()) {
+                    continue;
+                }
+                try {
+                    future.get(5, TimeUnit.SECONDS);
                     setLastCachedId(ASYNC_ADD, lastPending);
+                } catch (CancellationException ok) {
+                    continue;
+                } catch (TimeoutException potentialDeadlock) {
+                    LOG.debug("{} timed out waiting for async add", this, potentialDeadlock);
+                } catch (Exception worstCaseWeReplay) {
+                    LOG.debug("{} exception waiting for async add", this, worstCaseWeReplay);
                 }
-                break;
+            } else {
+                setLastCachedId(ASYNC_ADD, lastPending);
             }
-            if (lastCachedIds[ASYNC_ADD] != null) {
-                // ensure we don't skip current possibly sync add b/c we waited on the future
-                if (isAsync(currentAdd) || Long.compare(((Long) currentAdd.getMessageId().getFutureOrSequenceLong()), ((Long) lastCachedIds[ASYNC_ADD].getFutureOrSequenceLong())) > 0) {
-                    setBatch(lastCachedIds[ASYNC_ADD]);
+            break;
+        }
+
+        MessageId candidate = lastCachedIds[ASYNC_ADD];
+        if (candidate != null) {
+            // ensure we don't skip current possibly sync add b/c we waited on the future
+            if (!isAsync(currentAdd) && Long.compare(((Long) currentAdd.getMessageId().getFutureOrSequenceLong()), ((Long) lastCachedIds[ASYNC_ADD].getFutureOrSequenceLong())) < 0) {
+                if (LOG.isTraceEnabled()) {
+                    LOG.trace("no set batch from async:" + candidate.getFutureOrSequenceLong() + " >= than current: " + currentAdd.getMessageId().getFutureOrSequenceLong() + ", " + this);
                 }
+                candidate = null;
             }
-        } else {
-            setBatch(lastCachedIds[SYNC_ADD]);
+        }
+        if (candidate == null) {
+            candidate = lastCachedIds[SYNC_ADD];
+        }
+        if (candidate != null) {
+            setBatch(candidate);
         }
         // cleanup
         lastCachedIds[SYNC_ADD] = lastCachedIds[ASYNC_ADD] = null;
@@ -321,8 +351,20 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
             final Object futureOrLong = candidate.getFutureOrSequenceLong();
             if (futureOrLong instanceof Future) {
                 Future future = (Future) futureOrLong;
-                if (future.isCancelled()) {
-                    it.remove();
+                if (future.isDone()) {
+                    if (future.isCancelled()) {
+                        it.remove();
+                    } else {
+                        // check for exception, we may be seeing old state
+                        try {
+                            future.get(0, TimeUnit.SECONDS);
+                            // stale; if we get a result next prune will see Long
+                        } catch (ExecutionException expected) {
+                            it.remove();
+                        } catch (Exception unexpected) {
+                            LOG.debug("{} unexpected exception verifying exception state of future", this, unexpected);
+                        }
+                    }
                 } else {
                     // we don't want to wait for work to complete
                     break;
@@ -355,6 +397,8 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
             } else if (candidateOrSequenceLong != null &&
                     Long.compare(((Long) candidateOrSequenceLong), ((Long) lastCacheFutureOrSequenceLong)) > 0) {
                 lastCachedIds[index] = candidate;
+            } else if (LOG.isTraceEnabled()) {
+                LOG.trace("no set last cached[" + index + "] current:" + lastCacheFutureOrSequenceLong + " <= than candidate: " + candidateOrSequenceLong+ ", " + this);
             }
         }
     }
@@ -365,7 +409,6 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
 
     @Override
     public synchronized void addMessageFirst(MessageReference node) throws Exception {
-        setCacheEnabled(false);
         size++;
     }
 
@@ -460,7 +503,7 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
     @Override
     public String toString() {
         return super.toString() + ":" + regionDestination.getActiveMQDestination().getPhysicalName() + ",batchResetNeeded=" + batchResetNeeded
-                    + ",size=" + this.size + ",cacheEnabled=" + isCacheEnabled()
+                    + ",size=" + this.size + ",cacheEnabled=" + cacheEnabled
                     + ",maxBatchSize:" + maxBatchSize + ",hasSpace:" + hasSpace() + ",pendingCachedIds.size:" + pendingCachedIds.size()
                     + ",lastSyncCachedId:" + lastCachedIds[SYNC_ADD] + ",lastSyncCachedId-seq:" + (lastCachedIds[SYNC_ADD] != null ? lastCachedIds[SYNC_ADD].getFutureOrSequenceLong() : "null")
                     + ",lastAsyncCachedId:" + lastCachedIds[ASYNC_ADD] + ",lastAsyncCachedId-seq:" + (lastCachedIds[ASYNC_ADD] != null ? lastCachedIds[ASYNC_ADD].getFutureOrSequenceLong() : "null");

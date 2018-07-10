@@ -14,7 +14,7 @@
     See the License for the specific language governing permissions and
     limitations under the License.
 --%>
-<!-- Workaround for https://ops4j1.jira.com/browse/PAXWEB-1070 -->
+<%-- Workaround for https://ops4j1.jira.com/browse/PAXWEB-1070 --%>
 <%@include file="WEB-INF/jspf/headertags.jspf" %>
 <html>
 <head>
@@ -54,7 +54,7 @@
 </tr>
 </table>
 
-<h2>Queues:<c:if test="${null != param.QueueFilter && param.QueueFilter != ''}"> (filter='${param.QueueFilter}')</c:if></h2>
+<h2>Queues:<c:if test="${null != param.QueueFilter && param.QueueFilter != ''}"> (filter="<c:out value='${param.QueueFilter}'/>")</c:if></h2>
 
 <table id="queues" class="sortable autostripe">
 <thead>

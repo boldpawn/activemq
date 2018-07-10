@@ -29,7 +29,7 @@ import javax.jms.InvalidDestinationException;
 
 import org.apache.activemq.transport.amqp.client.util.AsyncResult;
 import org.apache.activemq.transport.amqp.client.util.ClientFuture;
-import org.apache.activemq.transport.amqp.client.util.UnmodifiableSender;
+import org.apache.activemq.transport.amqp.client.util.UnmodifiableProxy;
 import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.Symbol;
 import org.apache.qpid.proton.amqp.messaging.Accepted;
@@ -66,7 +66,10 @@ public class AmqpSender extends AmqpAbstractResource<Sender> {
     private final AmqpSession session;
     private final String address;
     private final String senderId;
+
     private final Target userSpecifiedTarget;
+    private final SenderSettleMode userSpecifiedSenderSettlementMode;
+    private final ReceiverSettleMode userSpecifiedReceiverSettlementMode;
 
     private boolean presettle;
     private long sendTimeout = DEFAULT_SEND_TIMEOUT;
@@ -77,7 +80,6 @@ public class AmqpSender extends AmqpAbstractResource<Sender> {
     private Symbol[] desiredCapabilities;
     private Symbol[] offeredCapabilities;
     private Map<Symbol, Object> properties;
-
 
     /**
      * Create a new sender instance.
@@ -90,6 +92,24 @@ public class AmqpSender extends AmqpAbstractResource<Sender> {
      *        The unique ID assigned to this sender.
      */
     public AmqpSender(AmqpSession session, String address, String senderId) {
+        this(session, address, senderId, null, null);
+    }
+
+    /**
+     * Create a new sender instance.
+     *
+     * @param session
+     *        The parent session that created the session.
+     * @param address
+     *        The address that this sender produces to.
+     * @param senderId
+     *        The unique ID assigned to this sender.
+     * @param senderMode
+     *        The {@link SenderSettleMode} to use on open.
+     * @param receiverMode
+     *        The {@link ReceiverSettleMode} to use on open.
+     */
+    public AmqpSender(AmqpSession session, String address, String senderId, SenderSettleMode senderMode, ReceiverSettleMode receiverMode) {
 
         if (address != null && address.isEmpty()) {
             throw new IllegalArgumentException("Address cannot be empty.");
@@ -99,6 +119,8 @@ public class AmqpSender extends AmqpAbstractResource<Sender> {
         this.address = address;
         this.senderId = senderId;
         this.userSpecifiedTarget = null;
+        this.userSpecifiedSenderSettlementMode = senderMode;
+        this.userSpecifiedReceiverSettlementMode = receiverMode;
     }
 
     /**
@@ -121,6 +143,8 @@ public class AmqpSender extends AmqpAbstractResource<Sender> {
         this.userSpecifiedTarget = target;
         this.address = target.getAddress();
         this.senderId = senderId;
+        this.userSpecifiedSenderSettlementMode = null;
+        this.userSpecifiedReceiverSettlementMode = null;
     }
 
     /**
@@ -205,7 +229,7 @@ public class AmqpSender extends AmqpAbstractResource<Sender> {
      * @return an unmodifiable view of the underlying Sender instance.
      */
     public Sender getSender() {
-        return new UnmodifiableSender(getEndpoint());
+        return UnmodifiableProxy.senderProxy(getEndpoint());
     }
 
     /**
@@ -302,12 +326,25 @@ public class AmqpSender extends AmqpAbstractResource<Sender> {
         Sender sender = session.getEndpoint().sender(senderName);
         sender.setSource(source);
         sender.setTarget(target);
-        if (presettle) {
-            sender.setSenderSettleMode(SenderSettleMode.SETTLED);
+
+        if (userSpecifiedSenderSettlementMode != null) {
+            sender.setSenderSettleMode(userSpecifiedSenderSettlementMode);
+            if (SenderSettleMode.SETTLED.equals(userSpecifiedSenderSettlementMode)) {
+                presettle = true;
+            }
         } else {
-            sender.setSenderSettleMode(SenderSettleMode.UNSETTLED);
+            if (presettle) {
+                sender.setSenderSettleMode(SenderSettleMode.SETTLED);
+            } else {
+                sender.setSenderSettleMode(SenderSettleMode.UNSETTLED);
+            }
         }
-        sender.setReceiverSettleMode(ReceiverSettleMode.FIRST);
+
+        if (userSpecifiedReceiverSettlementMode != null) {
+            sender.setReceiverSettleMode(userSpecifiedReceiverSettlementMode);
+        } else {
+            sender.setReceiverSettleMode(ReceiverSettleMode.FIRST);
+        }
 
         sender.setDesiredCapabilities(desiredCapabilities);
         sender.setOfferedCapabilities(offeredCapabilities);

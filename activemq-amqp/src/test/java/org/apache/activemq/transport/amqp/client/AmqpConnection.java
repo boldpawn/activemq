@@ -25,8 +25,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -39,7 +39,7 @@ import org.apache.activemq.transport.amqp.client.util.AsyncResult;
 import org.apache.activemq.transport.amqp.client.util.ClientFuture;
 import org.apache.activemq.transport.amqp.client.util.IdGenerator;
 import org.apache.activemq.transport.amqp.client.util.NoOpAsyncResult;
-import org.apache.activemq.transport.amqp.client.util.UnmodifiableConnection;
+import org.apache.activemq.transport.amqp.client.util.UnmodifiableProxy;
 import org.apache.qpid.proton.amqp.Symbol;
 import org.apache.qpid.proton.engine.Collector;
 import org.apache.qpid.proton.engine.Connection;
@@ -73,7 +73,7 @@ public class AmqpConnection extends AmqpAbstractResource<Connection> implements 
     public static final long DEFAULT_CLOSE_TIMEOUT = 30000;
     public static final long DEFAULT_DRAIN_TIMEOUT = 60000;
 
-    private final ScheduledExecutorService serializer;
+    private ScheduledThreadPoolExecutor serializer;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean connected = new AtomicBoolean();
     private final AtomicLong sessionIdGenerator = new AtomicLong();
@@ -116,7 +116,7 @@ public class AmqpConnection extends AmqpAbstractResource<Connection> implements 
         this.connectionId = CONNECTION_ID_GENERATOR.generateId();
         this.remoteURI = transport.getRemoteLocation();
 
-        this.serializer = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+        this.serializer = new ScheduledThreadPoolExecutor(1, new ThreadFactory() {
 
             @Override
             public Thread newThread(Runnable runner) {
@@ -127,7 +127,12 @@ public class AmqpConnection extends AmqpAbstractResource<Connection> implements 
             }
         });
 
+        // Ensure timely shutdown
+        this.serializer.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        this.serializer.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+
         this.transport.setTransportListener(this);
+        this.transport.setMaxFrameSize(getMaxFrameSize());
     }
 
     public void connect() throws Exception {
@@ -413,7 +418,7 @@ public class AmqpConnection extends AmqpAbstractResource<Connection> implements 
     }
 
     public Connection getConnection() {
-        return new UnmodifiableConnection(getEndpoint());
+        return UnmodifiableProxy.connectionProxy(getEndpoint());
     }
 
     public AmqpConnectionListener getListener() {
@@ -582,7 +587,7 @@ public class AmqpConnection extends AmqpAbstractResource<Connection> implements 
                 // Using nano time since it is not related to the wall clock, which may change
                 long initialNow = TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
                 long initialKeepAliveDeadline = protonTransport.tick(initialNow);
-                if (initialKeepAliveDeadline > 0) {
+                if (initialKeepAliveDeadline != 0) {
 
                     getScheduler().schedule(new Runnable() {
 
@@ -593,15 +598,16 @@ public class AmqpConnection extends AmqpAbstractResource<Connection> implements 
                                     LOG.debug("Client performing next idle check");
                                     // Using nano time since it is not related to the wall clock, which may change
                                     long now = TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
-                                    long rescheduleAt = protonTransport.tick(now) - now;
+                                    long deadline = protonTransport.tick(now);
+
                                     pumpToProtonTransport();
                                     if (protonTransport.isClosed()) {
                                         LOG.debug("Transport closed after inactivity check.");
-                                        throw new InactivityIOException("Channel was inactive for to long");
-                                    }
-
-                                    if (rescheduleAt > 0) {
-                                        getScheduler().schedule(this, rescheduleAt, TimeUnit.MILLISECONDS);
+                                        throw new InactivityIOException("Channel was inactive for too long");
+                                    } else {
+                                        if(deadline != 0) {
+                                            getScheduler().schedule(this, deadline - now, TimeUnit.MILLISECONDS);
+                                        }
                                     }
                                 }
                             } catch (Exception e) {

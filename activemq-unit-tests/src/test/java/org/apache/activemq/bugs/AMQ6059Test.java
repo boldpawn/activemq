@@ -16,6 +16,7 @@
  */
 package org.apache.activemq.bugs;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -41,6 +42,7 @@ import org.apache.activemq.broker.jmx.QueueViewMBean;
 import org.apache.activemq.broker.region.policy.PolicyEntry;
 import org.apache.activemq.broker.region.policy.PolicyMap;
 import org.apache.activemq.broker.region.policy.SharedDeadLetterStrategy;
+import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.leveldb.LevelDBStore;
 import org.apache.activemq.util.IOHelper;
@@ -78,7 +80,7 @@ public class AMQ6059Test {
     @Test
     public void testDLQRecovery() throws Exception {
 
-        sendMessage(new ActiveMQQueue("leveldbQueue"));
+        sendMessage(new ActiveMQQueue("QName"));
         TimeUnit.SECONDS.sleep(3);
 
         LOG.info("### Check for expired message moving to DLQ.");
@@ -101,8 +103,20 @@ public class AMQ6059Test {
         }));
 
         verifyMessageIsRecovered(dlqQueue);
-        restartBroker(broker);
+        restartBroker();
+        verifyIsDlq(dlqQueue);
         verifyMessageIsRecovered(dlqQueue);
+    }
+
+    @Test
+    public void testSetDlqFlag() throws Exception {
+        final ActiveMQQueue toFlp = new ActiveMQQueue("QNameToFlip");
+        sendMessage(toFlp);
+
+        final QueueViewMBean queueViewMBean = getProxyToQueue(toFlp.getQueueName());
+        assertFalse(queueViewMBean.isDLQ());
+        queueViewMBean.setDLQ(true);
+        assertTrue(queueViewMBean.isDLQ());
     }
 
     protected BrokerService createBroker() throws Exception {
@@ -111,24 +125,16 @@ public class AMQ6059Test {
 
     private BrokerService createBrokerWithDLQ(boolean purge) throws Exception {
         BrokerService broker = new BrokerService();
+        ActiveMQQueue dlq = new ActiveMQQueue("ActiveMQ.DLQ?isDLQ=true");
 
-        File directory = new File("target/activemq-data/leveldb");
-        if (purge) {
-            IOHelper.deleteChildren(directory);
-        }
-
-        LevelDBStore levelDBStore = new LevelDBStore();
-        levelDBStore.setDirectory(directory);
-        if (purge) {
-            levelDBStore.deleteAllMessages();
-        }
+        broker.setDestinations(new ActiveMQDestination[]{dlq});
 
         PolicyMap pMap = new PolicyMap();
 
         SharedDeadLetterStrategy sharedDLQStrategy = new SharedDeadLetterStrategy();
         sharedDLQStrategy.setProcessNonPersistent(true);
         sharedDLQStrategy.setProcessExpired(true);
-        sharedDLQStrategy.setDeadLetterQueue(new ActiveMQQueue("ActiveMQ.DLQ"));
+        sharedDLQStrategy.setDeadLetterQueue(dlq);
         sharedDLQStrategy.setExpiration(10000);
 
         PolicyEntry defaultPolicy = new PolicyEntry();
@@ -138,7 +144,6 @@ public class AMQ6059Test {
 
         pMap.put(new ActiveMQQueue(">"), defaultPolicy);
         broker.setDestinationPolicy(pMap);
-        broker.setPersistenceAdapter(levelDBStore);
         if (purge) {
             broker.setDeleteAllMessagesOnStartup(true);
         }
@@ -146,7 +151,7 @@ public class AMQ6059Test {
         return broker;
     }
 
-    private void restartBroker(BrokerService broker) throws Exception {
+    private void restartBroker() throws Exception {
         broker.stop();
         broker.waitUntilStopped();
         broker = createBrokerWithDLQ(false);

@@ -159,6 +159,12 @@ public abstract class ActiveMQDestination extends JNDIBaseStorable implements Da
             return 1;
         } else {
             if (destination.getDestinationType() == destination2.getDestinationType()) {
+
+                if (destination.isPattern() && destination2.isPattern() ) {
+                    if (destination.getPhysicalName().compareTo(destination2.getPhysicalName()) == 0) {
+                        return 0;
+                    }
+                }
                 if (destination.isPattern()) {
                     DestinationFilter filter = DestinationFilter.parseFilter(destination);
                     if (filter.matches(destination2)) {
@@ -419,11 +425,11 @@ public abstract class ActiveMQDestination extends JNDIBaseStorable implements Da
         return options != null && options.containsKey(IS_DLQ);
     }
 
-    public void setDLQ() {
+    public void setDLQ(boolean val) {
         if (options == null) {
             options = new HashMap<String, String>();
         }
-        options.put(IS_DLQ, String.valueOf(true));
+        options.put(IS_DLQ, String.valueOf(val));
     }
 
     public static UnresolvedDestinationTransformer getUnresolvableDestinationTransformer() {

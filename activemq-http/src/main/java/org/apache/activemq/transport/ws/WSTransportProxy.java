@@ -149,9 +149,9 @@ public final class WSTransportProxy extends TransportSupport implements Transpor
 
     @Override
     protected void doStart() throws Exception {
+        transport.setTransportListener(getTransportListener());
         socketTransportStarted.countDown();
 
-        transport.setTransportListener(getTransportListener());
         transport.start();
     }
 
@@ -218,6 +218,11 @@ public final class WSTransportProxy extends TransportSupport implements Transpor
     @Override
     public void onWebSocketConnect(Session session) {
         this.session = session;
+
+        if (wsTransport.getMaxFrameSize() > 0) {
+            this.session.getPolicy().setMaxBinaryMessageSize(wsTransport.getMaxFrameSize());
+            this.session.getPolicy().setMaxTextMessageSize(wsTransport.getMaxFrameSize());
+        }
     }
 
     @Override

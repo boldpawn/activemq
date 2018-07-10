@@ -125,7 +125,6 @@ import org.apache.activemq.util.ServiceStopper;
 import org.apache.activemq.util.StoreUtil;
 import org.apache.activemq.util.ThreadPoolUtils;
 import org.apache.activemq.util.TimeUtils;
-import org.apache.activemq.util.URISupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -199,6 +198,7 @@ public class BrokerService implements Service {
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final AtomicBoolean stopped = new AtomicBoolean(false);
     private final AtomicBoolean stopping = new AtomicBoolean(false);
+    private final AtomicBoolean preShutdownHooksInvoked = new AtomicBoolean(false);
     private BrokerPlugin[] plugins;
     private boolean keepDurableSubsActive = true;
     private boolean useVirtualTopics = true;
@@ -268,6 +268,7 @@ public class BrokerService implements Service {
     private boolean rollbackOnlyOnAsyncException = true;
 
     private int storeOpenWireVersion = OpenWireFormat.DEFAULT_STORE_VERSION;
+    private final List<Runnable> preShutdownHooks = new CopyOnWriteArrayList<>();
 
     static {
 
@@ -478,6 +479,16 @@ public class BrokerService implements Service {
         return connector;
     }
 
+    /**
+     * Adds a {@link Runnable} hook that will be invoked before the
+     * broker is stopped. This allows performing cleanup actions
+     * before the broker is stopped. The hook should not throw
+     * exceptions or block.
+     */
+    public final void addPreShutdownHook(final Runnable hook) {
+        preShutdownHooks.add(hook);
+    }
+
     public JmsConnector removeJmsConnector(JmsConnector connector) {
         if (jmsConnectors.remove(connector)) {
             return connector;
@@ -592,6 +603,7 @@ public class BrokerService implements Service {
 
         setStartException(null);
         stopping.set(false);
+        preShutdownHooksInvoked.set(false);
         startDate = new Date();
         MDC.put("activemq.broker", brokerName);
 
@@ -788,6 +800,22 @@ public class BrokerService implements Service {
      */
     @Override
     public void stop() throws Exception {
+        final ServiceStopper stopper = new ServiceStopper();
+
+        //The preShutdownHooks need to run before stopping.compareAndSet()
+        //so there is a separate AtomicBoolean so the hooks only run once
+        //We want to make sure the hooks are run before stop is initialized
+        //including setting the stopping variable - See AMQ-6706
+        if (preShutdownHooksInvoked.compareAndSet(false, true)) {
+            for (Runnable hook : preShutdownHooks) {
+                try {
+                    hook.run();
+                } catch (Throwable e) {
+                    stopper.onException(hook, e);
+                }
+            }
+        }
+
         if (!stopping.compareAndSet(false, true)) {
             LOG.trace("Broker already stopping/stopped");
             return;
@@ -812,7 +840,6 @@ public class BrokerService implements Service {
             this.scheduler.stop();
             this.scheduler = null;
         }
-        ServiceStopper stopper = new ServiceStopper();
         if (services != null) {
             for (Service service : services) {
                 stopper.stop(service);
@@ -1760,6 +1787,8 @@ public class BrokerService implements Service {
                 this.tempDataStore = (PListStore) getClass().getClassLoader().loadClass(clazz).newInstance();
                 this.tempDataStore.setDirectory(getTmpDataDirectory());
                 configureService(tempDataStore);
+            } catch (ClassNotFoundException e) {
+                throw new RuntimeException("Kahadb class PListStoreImpl not found. Add activemq-kahadb jar or set persistent to false on BrokerService.", e);
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -2130,13 +2159,13 @@ public class BrokerService implements Service {
                 public void run() {
                     try {
                         checkStoreUsageLimits();
-                    } catch (Exception e) {
+                    } catch (Throwable e) {
                         LOG.error("Failed to check persistent disk usage limits", e);
                     }
 
                     try {
                         checkTmpStoreUsageLimits();
-                    } catch (Exception e) {
+                    } catch (Throwable e) {
                         LOG.error("Failed to check temporary store usage limits", e);
                     }
                 }
@@ -2617,12 +2646,6 @@ public class BrokerService implements Service {
             setTransportConnectors(al);
         }
         this.slave = false;
-        URI uri = getVmConnectorURI();
-        Map<String, String> map = new HashMap<>(URISupport.parseParameters(uri));
-        map.put("async", "false");
-        map.put("create","false");
-        uri = URISupport.createURIWithQuery(uri, URISupport.createQueryString(map));
-
         if (!stopped.get()) {
             ThreadPoolExecutor networkConnectorStartExecutor = null;
             if (isNetworkConnectorStartAsync()) {
@@ -2642,7 +2665,7 @@ public class BrokerService implements Service {
 
             for (Iterator<NetworkConnector> iter = getNetworkConnectors().iterator(); iter.hasNext();) {
                 final NetworkConnector connector = iter.next();
-                connector.setLocalUri(uri);
+                connector.setLocalUri(getVmConnectorURI());
                 startNetworkConnector(connector, durableDestinations, networkConnectorStartExecutor);
             }
             if (networkConnectorStartExecutor != null) {
@@ -2850,6 +2873,10 @@ public class BrokerService implements Service {
 
     public void setRegionBroker(Broker regionBroker) {
         this.regionBroker = regionBroker;
+    }
+
+    public final void removePreShutdownHook(final Runnable hook) {
+        preShutdownHooks.remove(hook);
     }
 
     public void addShutdownHook(Runnable hook) {

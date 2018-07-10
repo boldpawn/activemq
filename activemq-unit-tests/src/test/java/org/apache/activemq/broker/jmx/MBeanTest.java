@@ -54,6 +54,7 @@ import org.apache.activemq.ActiveMQPrefetchPolicy;
 import org.apache.activemq.ActiveMQSession;
 import org.apache.activemq.BlobMessage;
 import org.apache.activemq.EmbeddedBrokerTestSupport;
+import org.apache.activemq.RedeliveryPolicy;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.region.BaseDestination;
 import org.apache.activemq.broker.region.policy.PolicyEntry;
@@ -180,6 +181,56 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         assertEquals("no forwards", 0, queueNew.getForwardCount());
     }
 
+    public void testMoveFromDLQImmediateDLQ() throws Exception {
+
+        RedeliveryPolicy redeliveryPolicy = new RedeliveryPolicy();
+        redeliveryPolicy.setMaximumRedeliveries(0);
+        ((ActiveMQConnectionFactory)connectionFactory).setRedeliveryPolicy(redeliveryPolicy);
+        Connection connection = connectionFactory.createConnection();
+
+        // populate
+        useConnection(connection);
+
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Destination dest = session.createQueue(getDestinationString());
+        MessageConsumer consumer = session.createConsumer(dest);
+        consumer.setMessageListener(new MessageListener() {
+            @Override
+            public void onMessage(Message message) {
+                try {
+                    System.out.println("Received: " + message + " on " + message.getJMSDestination());
+                } catch (JMSException e) {
+                    e.printStackTrace();
+                }
+                throw new RuntimeException("Horrible exception");
+            }});
+
+
+        ObjectName queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + getDestinationString());
+        QueueViewMBean queue = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+
+        ObjectName dlqQueueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + SharedDeadLetterStrategy.DEFAULT_DEAD_LETTER_QUEUE_NAME );
+        QueueViewMBean dlq = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, dlqQueueViewMBeanName, QueueViewMBean.class, true);
+
+        assertTrue("messages on dlq", Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                LOG.info("Dlq size: " + dlq.getQueueSize() + ", qSize: " + queue.getQueueSize());
+                return MESSAGE_COUNT == dlq.getQueueSize();
+            }
+        }));
+
+        dlq.retryMessages();
+
+        assertTrue("messages on dlq after retry", Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                LOG.info("Dlq size: " + dlq.getQueueSize() + ", qSize: " + queue.getQueueSize());
+                return MESSAGE_COUNT == dlq.getQueueSize();
+            }
+        }));
+    }
+
     //Show broken behaviour https://issues.apache.org/jira/browse/AMQ-5752"
     // points to the need to except on a duplicate or have store.addMessage return boolean
     // need some thought on how best to resolve this
@@ -221,6 +272,33 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
 
         compdatalist = queue.browse();
         actualCount = compdatalist.length;
+        echo("Current queue size: " + actualCount);
+        assertEquals("no change", initialQueueSize, actualCount);
+    }
+
+    public void testMoveCopyToSameDestFails() throws Exception {
+        connection = connectionFactory.createConnection();
+        useConnection(connection);
+
+        ObjectName queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + getDestinationString());
+
+        QueueViewMBean queue = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+
+        CompositeData[] compdatalist = queue.browse();
+        int initialQueueSize = compdatalist.length;
+        CompositeData cdata = compdatalist[0];
+        String messageID = (String) cdata.get("JMSMessageID");
+
+        assertFalse("fail to copy to self", queue.copyMessageTo(messageID, getDestinationString()));
+        assertEquals("fail to copy to self", 0, queue.copyMatchingMessagesTo("", getDestinationString()));
+        assertEquals("fail to copy x to self", 0, queue.copyMatchingMessagesTo("", getDestinationString(), initialQueueSize));
+
+        assertFalse("fail to move to self", queue.moveMessageTo(messageID, getDestinationString()));
+        assertEquals("fail to move to self", 0, queue.moveMatchingMessagesTo("", getDestinationString()));
+        assertEquals("fail to move x to self", 0, queue.moveMatchingMessagesTo("", getDestinationString(), initialQueueSize));
+
+        compdatalist = queue.browse();
+        int actualCount = compdatalist.length;
         echo("Current queue size: " + actualCount);
         assertEquals("no change", initialQueueSize, actualCount);
     }
@@ -409,6 +487,45 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
 
         assertEquals("Should have no more messages in the queue: " + queueViewMBeanName, 0, queue.getQueueSize());
         assertEquals("dest has no memory usage", 0, queue.getMemoryPercentUsage());
+    }
+
+
+    public void testCopyPurgeCopyBack() throws Exception {
+        connection = connectionFactory.createConnection();
+        final int numMessages = 100;
+        useConnection(connection, numMessages);
+
+        ObjectName queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + getDestinationString());
+
+        QueueViewMBean queueT = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+
+        String newDestination = getSecondDestinationString();
+        long queueSize = queueT.getQueueSize();
+        assertTrue(queueSize > 0);
+
+        int c = queueT.copyMatchingMessagesTo(null, newDestination);
+        LOG.info("Copied: " + c);
+
+        queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + newDestination);
+
+        QueueViewMBean queueD = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+
+        LOG.info("Queue: " + queueD.getName() + " now has: " + queueD.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueD.getQueueSize(), numMessages, queueD.getQueueSize());
+
+        LOG.info("Queue: " + queueT.getName() + " now has: " + queueT.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueT.getQueueSize(), numMessages, queueT.getQueueSize());
+
+        queueT.purge();
+        queueD.copyMatchingMessagesTo(null, getDestinationString());
+
+        LOG.info("Queue: " + queueD.getName() + " now has: " + queueD.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueD.getQueueSize(), numMessages, queueD.getQueueSize());
+
+        LOG.info("Queue: " + queueT.getName() + " now has: " + queueT.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueT.getQueueSize(), numMessages, queueT.getQueueSize());
+
+        assertNotRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + SharedDeadLetterStrategy.DEFAULT_DEAD_LETTER_QUEUE_NAME );
     }
 
     public void testCreateDestinationWithSpacesAtEnds() throws Exception {

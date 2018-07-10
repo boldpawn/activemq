@@ -20,7 +20,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.NoSuchElementException;
 
-import org.apache.activemq.transport.amqp.client.util.UnmodifiableDelivery;
+import org.apache.activemq.transport.amqp.client.util.UnmodifiableProxy;
 import org.apache.qpid.proton.Proton;
 import org.apache.qpid.proton.amqp.Binary;
 import org.apache.qpid.proton.amqp.DescribedType;
@@ -104,7 +104,7 @@ public class AmqpMessage {
      */
     public Delivery getWrappedDelivery() {
         if (delivery != null) {
-            return new UnmodifiableDelivery(delivery);
+            return UnmodifiableProxy.deliveryProxy(delivery);
         }
 
         return null;
@@ -433,6 +433,78 @@ public class AmqpMessage {
     }
 
     /**
+     * Sets the priority header on the outgoing message.
+     *
+     * @param priority the priority value to set.
+     */
+    public void setPriority(short priority) {
+       checkReadOnly();
+       lazyCreateHeader();
+       getWrappedMessage().setPriority(priority);
+    }
+
+    /**
+     * Gets the priority header on the message.
+     */
+    public short getPriority() {
+       return getWrappedMessage().getPriority();
+    }
+
+    /**
+     * Sets the ttl header on the outgoing message.
+     *
+     * @param timeToLive the ttl value to set.
+     */
+    public void setTimeToLive(long timeToLive) {
+       checkReadOnly();
+       lazyCreateHeader();
+       getWrappedMessage().setTtl(timeToLive);
+    }
+
+    /**
+     * Sets the ttl header on the outgoing message.
+     */
+    public long getTimeToLive() {
+       return getWrappedMessage().getTtl();
+    }
+
+    /**
+     * Sets the absolute expiration time property on the message.
+     *
+     * @param absoluteExpiryTime the expiration time value to set.
+     */
+    public void setAbsoluteExpiryTime(long absoluteExpiryTime) {
+       checkReadOnly();
+       lazyCreateProperties();
+       getWrappedMessage().setExpiryTime(absoluteExpiryTime);
+    }
+
+    /**
+     * Gets the absolute expiration time property on the message.
+     */
+    public long getAbsoluteExpiryTime() {
+       return getWrappedMessage().getExpiryTime();
+    }
+
+    /**
+     * Sets the creation time property on the message.
+     *
+     * @param creationTime the time value to set.
+     */
+    public void setCreationTime(long creationTime) {
+       checkReadOnly();
+       lazyCreateProperties();
+       getWrappedMessage().setCreationTime(creationTime);
+    }
+
+    /**
+     * Gets the absolute expiration time property on the message.
+     */
+    public long getCreationTime() {
+       return getWrappedMessage().getCreationTime();
+    }
+
+    /**
      * Sets a given application property on an outbound message.
      *
      * @param key
@@ -615,21 +687,21 @@ public class AmqpMessage {
 
     private void lazyCreateMessageAnnotations() {
         if (messageAnnotationsMap == null) {
-            messageAnnotationsMap = new HashMap<Symbol,Object>();
+            messageAnnotationsMap = new HashMap<>();
             message.setMessageAnnotations(new MessageAnnotations(messageAnnotationsMap));
         }
     }
 
     private void lazyCreateDeliveryAnnotations() {
         if (deliveryAnnotationsMap == null) {
-            deliveryAnnotationsMap = new HashMap<Symbol,Object>();
+            deliveryAnnotationsMap = new HashMap<>();
             message.setDeliveryAnnotations(new DeliveryAnnotations(deliveryAnnotationsMap));
         }
     }
 
     private void lazyCreateApplicationProperties() {
         if (applicationPropertiesMap == null) {
-            applicationPropertiesMap = new HashMap<String, Object>();
+            applicationPropertiesMap = new HashMap<>();
             message.setApplicationProperties(new ApplicationProperties(applicationPropertiesMap));
         }
     }

@@ -101,6 +101,7 @@ import org.apache.activemq.transport.TransportDisposedIOException;
 import org.apache.activemq.util.IntrospectionSupport;
 import org.apache.activemq.util.MarshallingSupport;
 import org.apache.activemq.util.NetworkBridgeUtils;
+import org.apache.activemq.util.SubscriptionKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -189,9 +190,13 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
                         throw new RuntimeException("Protocol violation - Command corrupted: " + o.toString());
                     }
                     Command command = (Command) o;
-                    Response response = service(command);
-                    if (response != null) {
-                        dispatchSync(response);
+                    if (!brokerService.isStopping()) {
+                        Response response = service(command);
+                        if (response != null && !brokerService.isStopping()) {
+                            dispatchSync(response);
+                        }
+                    } else {
+                        throw new BrokerStoppedException("Broker " + brokerService + " is being stopped");
                     }
                 } finally {
                     serviceLock.readLock().unlock();
@@ -321,13 +326,10 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
         boolean responseRequired = command.isResponseRequired();
         int commandId = command.getCommandId();
         try {
-            if (brokerService.isStopping()) {
-                response = responseRequired ? new ExceptionResponse(
-                    new BrokerStoppedException("Broker " + brokerService + " is being stopped")) : null;
-            } else if (!pendingStop.get()) {
+            if (!pendingStop.get()) {
                 response = command.visit(this);
             } else {
-                response = responseRequired ? new ExceptionResponse(transportException.get()) : null;
+                response = new ExceptionResponse(transportException.get());
             }
         } catch (Throwable e) {
             if (SERVICELOG.isDebugEnabled() && e.getClass() != BrokerStoppedException.class) {
@@ -844,7 +846,7 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
                 brokerConnectionStates.remove(info.getConnectionId());
             }
             unregisterConnectionState(info.getConnectionId());
-            LOG.warn("Failed to add Connection id={}, clientId={} due to {}", info.getConnectionId(), clientId, e);
+            LOG.warn("Failed to add Connection id={}, clientId={} due to {}", info.getConnectionId(), clientId, e.getLocalizedMessage(), e);
             //AMQ-6561 - stop for all exceptions on addConnection
             // close this down - in case the peer of this transport doesn't play nice
             delayedStop(2000, "Failed with SecurityException: " + e.getLocalizedMessage(), e);
@@ -1428,7 +1430,7 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
                     }
                     setDuplexNetworkConnectorId(duplexNetworkConnectorId);
                 }
-                Transport localTransport = NetworkBridgeFactory.createLocalTransport(broker);
+                Transport localTransport = NetworkBridgeFactory.createLocalTransport(config, broker.getVmConnectorURI());
                 Transport remoteBridgeTransport = transport;
                 if (! (remoteBridgeTransport instanceof ResponseCorrelator)) {
                     // the vm transport case is already wrapped
@@ -1440,7 +1442,7 @@ public class TransportConnection implements Connection, Task, CommandVisitor {
                 }
                 MBeanNetworkListener listener = new MBeanNetworkListener(brokerService, config, brokerService.createDuplexNetworkConnectorObjectName(duplexName));
                 listener.setCreatedByDuplex(true);
-                duplexBridge = NetworkBridgeFactory.createBridge(config, localTransport, remoteBridgeTransport, listener);
+                duplexBridge = config.getBridgeFactory().createNetworkBridge(config, localTransport, remoteBridgeTransport, listener);
                 duplexBridge.setBrokerService(brokerService);
                 //Need to set durableDestinations to properly restart subs when dynamicOnly=false
                 duplexBridge.setDurableDestinations(NetworkConnector.getDurableTopicDestinations(
