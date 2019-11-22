@@ -86,7 +86,7 @@ import org.apache.activemq.command.ShutdownInfo;
 import org.apache.activemq.command.SubscriptionInfo;
 import org.apache.activemq.command.WireFormatInfo;
 import org.apache.activemq.filter.DestinationFilter;
-import org.apache.activemq.filter.MessageEvaluationContext;
+import org.apache.activemq.filter.NonCachedMessageEvaluationContext;
 import org.apache.activemq.security.SecurityContext;
 import org.apache.activemq.transport.DefaultTransportListener;
 import org.apache.activemq.transport.FutureResponse;
@@ -808,6 +808,7 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
                                 if (!isPermissableDestination(message.getDestination(), true)) {
                                     return;
                                 }
+                                safeWaitUntilStarted();
                                 // message being forwarded - we need to
                                 // propagate the response to our local send
                                 if (canDuplexDispatch(message)) {
@@ -1073,8 +1074,11 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
             sending.setConnectionId(this.localConnectionInfo.getConnectionId());
             localBroker.oneway(sending);
 
-            //remove subscriber from map
+            //remove subscriber from local map
             i.remove();
+
+            //need to remove the mapping from the remote map as well
+            subscriptionMapByRemoteId.remove(ds.getRemoteInfo().getConsumerId());
         }
     }
 
@@ -1303,13 +1307,10 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
         // for durable subs, suppression via filter leaves dangling acks so we
         // need to check here and allow the ack irrespective
         if (sub.getLocalInfo().isDurable()) {
-            MessageEvaluationContext messageEvalContext = new MessageEvaluationContext();
+            NonCachedMessageEvaluationContext messageEvalContext = new NonCachedMessageEvaluationContext();
             messageEvalContext.setMessageReference(md.getMessage());
             messageEvalContext.setDestination(md.getDestination());
             suppress = !sub.getNetworkBridgeFilter().matches(messageEvalContext);
-            //AMQ-6465 - Need to decrement the reference count after checking matches() as
-            //the call above will increment the reference count by 1
-            messageEvalContext.getMessageReference().decrementReferenceCount();
         }
         return suppress;
     }
@@ -1923,7 +1924,7 @@ public abstract class DemandForwardingBridgeSupport implements NetworkBridge, Br
                 if (info == null) {
                     long deadline = System.currentTimeMillis() + unit.toMillis(timeout);
 
-                    while (!disposed.get() || System.currentTimeMillis() < deadline) {
+                    while (!disposed.get() || System.currentTimeMillis() - deadline < 0) {
                         if (slot.await(1, TimeUnit.MILLISECONDS)) {
                             break;
                         }

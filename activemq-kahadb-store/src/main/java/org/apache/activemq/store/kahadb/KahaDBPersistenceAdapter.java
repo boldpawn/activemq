@@ -16,15 +16,6 @@
  */
 package org.apache.activemq.store.kahadb;
 
-import static org.apache.activemq.broker.jmx.BrokerMBeanSupport.createPersistenceAdapterName;
-
-import java.io.File;
-import java.io.IOException;
-import java.util.Set;
-import java.util.concurrent.Callable;
-
-import javax.management.ObjectName;
-
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.ConnectionContext;
 import org.apache.activemq.broker.LockableServiceSupport;
@@ -44,6 +35,7 @@ import org.apache.activemq.store.JournaledStore;
 import org.apache.activemq.store.MessageStore;
 import org.apache.activemq.store.NoLocalSubscriptionAware;
 import org.apache.activemq.store.PersistenceAdapter;
+import org.apache.activemq.store.PersistenceAdapterStatistics;
 import org.apache.activemq.store.SharedFileLocker;
 import org.apache.activemq.store.TopicMessageStore;
 import org.apache.activemq.store.TransactionIdTransformer;
@@ -55,6 +47,14 @@ import org.apache.activemq.store.kahadb.data.KahaXATransactionId;
 import org.apache.activemq.store.kahadb.disk.journal.Journal.JournalDiskSyncStrategy;
 import org.apache.activemq.usage.SystemUsage;
 import org.apache.activemq.util.ServiceStopper;
+
+import javax.management.ObjectName;
+import java.io.File;
+import java.io.IOException;
+import java.util.Set;
+import java.util.concurrent.Callable;
+
+import static org.apache.activemq.broker.jmx.BrokerMBeanSupport.createPersistenceAdapterName;
 
 /**
  * An implementation of {@link PersistenceAdapter} designed for use with
@@ -79,13 +79,13 @@ public class KahaDBPersistenceAdapter extends LockableServiceSupport implements 
     }
 
     /**
-     * @param sync
+     * @param cleanup
      * @throws IOException
      * @see org.apache.activemq.store.PersistenceAdapter#checkpoint(boolean)
      */
     @Override
-    public void checkpoint(boolean sync) throws IOException {
-        this.letter.checkpoint(sync);
+    public void checkpoint(boolean cleanup) throws IOException {
+        this.letter.checkpoint(cleanup);
     }
 
     /**
@@ -245,6 +245,9 @@ public class KahaDBPersistenceAdapter extends LockableServiceSupport implements 
                     return letter.getJournal().getFileMap().keySet().toString();
                 }
             });
+
+            view.setPersistenceAdapterStatistics(letter.persistenceAdapterStatistics);
+
             AnnotatedMBean.registerMBean(brokerService.getManagementContext(), view,
                     createPersistenceAdapterName(brokerService.getBrokerObjectName().toString(), toString()));
         }
@@ -405,6 +408,15 @@ public class KahaDBPersistenceAdapter extends LockableServiceSupport implements 
     }
 
     /**
+     * Get the PersistenceAdapterStatistics
+     *
+     * @return the persistenceAdapterStatistics
+     */
+    public PersistenceAdapterStatistics getPersistenceAdapterStatistics() {
+        return this.letter.getPersistenceAdapterStatistics();
+    }
+
+    /**
      * Get the directory
      *
      * @return the directory
@@ -545,6 +557,14 @@ public class KahaDBPersistenceAdapter extends LockableServiceSupport implements 
 
     public void setCheckForCorruptJournalFiles(boolean checkForCorruptJournalFiles) {
         letter.setCheckForCorruptJournalFiles(checkForCorruptJournalFiles);
+    }
+
+    public String getPurgeRecoveredXATransactionStrategy() {
+        return letter.getPurgeRecoveredXATransactionStrategy();
+    }
+
+    public void setPurgeRecoveredXATransactionStrategy(String purgeRecoveredXATransactionStrategy) {
+        letter.setPurgeRecoveredXATransactionStrategy(purgeRecoveredXATransactionStrategy);
     }
 
     @Override
@@ -808,5 +828,16 @@ public class KahaDBPersistenceAdapter extends LockableServiceSupport implements 
     @Override
     public boolean isPersistNoLocal() {
         return this.letter.isPersistNoLocal();
+    }
+
+    /*
+     * When set, ensure that the cleanup/gc operation is executed during the stop procedure
+     */
+    public void setCleanupOnStop(boolean cleanupOnStop) {
+        this.letter.setCleanupOnStop(cleanupOnStop);
+    }
+
+    public boolean getCleanupOnStop() {
+        return this.letter.getCleanupOnStop();
     }
 }

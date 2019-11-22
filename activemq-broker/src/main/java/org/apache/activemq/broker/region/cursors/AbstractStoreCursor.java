@@ -148,7 +148,9 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
             // if the index suppressed it (original still present), or whether it was stored and needs to be removed
             Object possibleFuture = message.getMessageId().getFutureOrSequenceLong();
             if (possibleFuture instanceof Future) {
-                ((Future) possibleFuture).get();
+                try {
+                    ((Future) possibleFuture).get();
+                } catch (Exception okToErrorOrCancelStoreOp) {}
             }
             // need to access again after wait on future
             Object sequence = message.getMessageId().getFutureOrSequenceLong();
@@ -283,6 +285,12 @@ public abstract class AbstractStoreCursor extends AbstractPendingMessageCursor i
 
     protected boolean canEnableCash() {
         return useCache && size==0 && hasSpace() && isStarted();
+    }
+
+    @Override
+    public boolean canRecoveryNextMessage() {
+        // Should be safe to recovery messages if the overall memory usage if < 90%
+        return parentHasSpace(90);
     }
 
     private void syncWithStore(Message currentAdd) throws Exception {

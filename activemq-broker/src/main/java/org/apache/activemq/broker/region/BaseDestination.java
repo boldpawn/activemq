@@ -42,6 +42,7 @@ import org.apache.activemq.store.MessageStore;
 import org.apache.activemq.thread.Scheduler;
 import org.apache.activemq.usage.MemoryUsage;
 import org.apache.activemq.usage.SystemUsage;
+import org.apache.activemq.usage.TempUsage;
 import org.apache.activemq.usage.Usage;
 import org.slf4j.Logger;
 
@@ -59,6 +60,7 @@ public abstract class BaseDestination implements Destination {
     public static final long DEFAULT_INACTIVE_TIMEOUT_BEFORE_GC = 60 * 1000;
     public static final int MAX_PRODUCERS_TO_AUDIT = 64;
     public static final int MAX_AUDIT_DEPTH = 10000;
+    public static final String DUPLICATE_FROM_STORE_MSG_PREFIX = "duplicate from store for ";
 
     protected final AtomicBoolean started = new AtomicBoolean();
     protected final ActiveMQDestination destination;
@@ -275,6 +277,11 @@ public abstract class BaseDestination implements Destination {
     @Override
     public void setMemoryUsage(MemoryUsage memoryUsage) {
         this.memoryUsage = memoryUsage;
+    }
+
+    @Override
+    public TempUsage getTempUsage() {
+        return systemUsage.getTempUsage();
     }
 
     @Override
@@ -851,7 +858,7 @@ public abstract class BaseDestination implements Destination {
     }
 
     public ConnectionContext createConnectionContext() {
-        ConnectionContext answer = new ConnectionContext(new NonCachedMessageEvaluationContext());
+        ConnectionContext answer = new ConnectionContext();
         answer.setBroker(this.broker);
         answer.getMessageEvaluationContext().setDestination(getActiveMQDestination());
         answer.setSecurityContext(SecurityContext.BROKER_SECURITY_CONTEXT);
@@ -881,16 +888,16 @@ public abstract class BaseDestination implements Destination {
     }
 
     @Override
-    public void duplicateFromStore(Message message, Subscription durableSub) {
+    public void duplicateFromStore(Message message, Subscription subscription) {
         ConnectionContext connectionContext = createConnectionContext();
-        getLog().warn("duplicate message from store {}, redirecting for dlq processing", message.getMessageId());
-        Throwable cause = new Throwable("duplicate from store for " + destination);
+        getLog().warn("{}{}, redirecting {} for dlq processing", DUPLICATE_FROM_STORE_MSG_PREFIX, destination, message.getMessageId());
+        Throwable cause = new Throwable(DUPLICATE_FROM_STORE_MSG_PREFIX + destination);
         message.setRegionDestination(this);
         broker.getRoot().sendToDeadLetterQueue(connectionContext, message, null, cause);
         MessageAck messageAck = new MessageAck(message, MessageAck.POSION_ACK_TYPE, 1);
         messageAck.setPoisonCause(cause);
         try {
-            acknowledge(connectionContext, durableSub, messageAck, message);
+            acknowledge(connectionContext, subscription, messageAck, message);
         } catch (IOException e) {
             getLog().error("Failed to acknowledge duplicate message {} from {} with {}", message.getMessageId(), destination, messageAck);
         }

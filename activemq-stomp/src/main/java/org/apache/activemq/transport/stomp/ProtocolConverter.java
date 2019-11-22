@@ -22,6 +22,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -107,16 +108,18 @@ public class ProtocolConverter {
     private final LongSequenceGenerator transactionIdGenerator = new LongSequenceGenerator();
     private final LongSequenceGenerator tempDestinationGenerator = new LongSequenceGenerator();
 
-    private final ConcurrentMap<Integer, ResponseHandler> resposeHandlers = new ConcurrentHashMap<Integer, ResponseHandler>();
-    private final ConcurrentMap<ConsumerId, StompSubscription> subscriptionsByConsumerId = new ConcurrentHashMap<ConsumerId, StompSubscription>();
-    private final ConcurrentMap<String, StompSubscription> subscriptions = new ConcurrentHashMap<String, StompSubscription>();
-    private final ConcurrentMap<String, ActiveMQDestination> tempDestinations = new ConcurrentHashMap<String, ActiveMQDestination>();
-    private final ConcurrentMap<String, String> tempDestinationAmqToStompMap = new ConcurrentHashMap<String, String>();
-    private final Map<String, LocalTransactionId> transactions = new ConcurrentHashMap<String, LocalTransactionId>();
+    private final ConcurrentMap<Integer, ResponseHandler> resposeHandlers = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ConsumerId, StompSubscription> subscriptionsByConsumerId = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, StompSubscription> subscriptions = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ActiveMQDestination> tempDestinations = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, String> tempDestinationAmqToStompMap = new ConcurrentHashMap<>();
+    private final Map<String, LocalTransactionId> transactions = new ConcurrentHashMap<>();
     private final StompTransport stompTransport;
 
-    private final ConcurrentMap<String, AckEntry> pedingAcks = new ConcurrentHashMap<String, AckEntry>();
-    private final IdGenerator ACK_ID_GENERATOR = new IdGenerator();
+    // Global Map shared with all subscriptions to allow finding the sub associated with an ACK Id
+    private final ConcurrentMap<String, StompAckEntry> pendingAcksTracker = new ConcurrentHashMap<>();
+    // Read-Only view used in this class to enforce the separation of read vs update of the global index.
+    private final Map<String, StompAckEntry> pendingAcks = Collections.unmodifiableMap(pendingAcksTracker);
 
     private final Object commnadIdMutex = new Object();
     private int lastCommandId;
@@ -129,34 +132,6 @@ public class ProtocolConverter {
     private long hbWriteInterval;
     private float hbGracePeriodMultiplier = 1.0f;
     private String defaultHeartBeat = Stomp.DEFAULT_HEART_BEAT;
-
-    private static class AckEntry {
-
-        private final String messageId;
-        private final StompSubscription subscription;
-
-        public AckEntry(String messageId, StompSubscription subscription) {
-            this.messageId = messageId;
-            this.subscription = subscription;
-        }
-
-        public MessageAck onMessageAck(TransactionId transactionId) {
-            return subscription.onStompMessageAck(messageId, transactionId);
-        }
-
-        public MessageAck onMessageNack(TransactionId transactionId) throws ProtocolException {
-            return subscription.onStompMessageNack(messageId, transactionId);
-        }
-
-        public String getMessageId() {
-            return this.messageId;
-        }
-
-        @SuppressWarnings("unused")
-        public StompSubscription getSubscription() {
-            return this.subscription;
-        }
-    }
 
     public ProtocolConverter(StompTransport stompTransport, BrokerContext brokerContext) {
         this.stompTransport = stompTransport;
@@ -256,9 +231,9 @@ public class ProtocolConverter {
                 onStompCommit(command);
             } else if (action.startsWith(Stomp.Commands.ABORT)) {
                 onStompAbort(command);
-            } else if (action.startsWith(Stomp.Commands.SUBSCRIBE)) {
+            } else if (action.startsWith(Stomp.Commands.SUBSCRIBE_PREFIX)) {
                 onStompSubscribe(command);
-            } else if (action.startsWith(Stomp.Commands.UNSUBSCRIBE)) {
+            } else if (action.startsWith(Stomp.Commands.UNSUBSCRIBE_PREFIX)) {
                 onStompUnsubscribe(command);
             } else if (action.startsWith(Stomp.Commands.CONNECT) ||
                        action.startsWith(Stomp.Commands.STOMP)) {
@@ -296,10 +271,14 @@ public class ProtocolConverter {
         // Let the stomp client know about any protocol errors.
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         PrintWriter stream = new PrintWriter(new OutputStreamWriter(baos, "UTF-8"));
-        exception.printStackTrace(stream);
+        if (exception instanceof SecurityException || exception.getCause() instanceof SecurityException) {
+            stream.write(exception.getLocalizedMessage());
+        } else {
+            exception.printStackTrace(stream);
+        }
         stream.close();
 
-        HashMap<String, String> headers = new HashMap<String, String>();
+        HashMap<String, String> headers = new HashMap<>();
         headers.put(Stomp.Headers.Error.MESSAGE, exception.getMessage());
         headers.put(Stomp.Headers.CONTENT_TYPE, "text/plain");
 
@@ -382,9 +361,9 @@ public class ProtocolConverter {
         boolean nacked = false;
 
         if (ackId != null) {
-            AckEntry pendingAck = this.pedingAcks.remove(ackId);
+            StompAckEntry pendingAck = this.pendingAcks.get(ackId);
             if (pendingAck != null) {
-                messageId = pendingAck.getMessageId();
+                messageId = pendingAck.getMessageId().toString();
                 MessageAck ack = pendingAck.onMessageNack(activemqTx);
                 if (ack != null) {
                     sendToActiveMQ(ack, createResponseHandler(command));
@@ -438,9 +417,9 @@ public class ProtocolConverter {
         boolean acked = false;
 
         if (ackId != null) {
-            AckEntry pendingAck = this.pedingAcks.remove(ackId);
+            StompAckEntry pendingAck = this.pendingAcks.get(ackId);
             if (pendingAck != null) {
-                messageId = pendingAck.getMessageId();
+                messageId = pendingAck.getMessageId().toString();
                 MessageAck ack = pendingAck.onMessageAck(activemqTx);
                 if (ack != null) {
                     sendToActiveMQ(ack, createResponseHandler(command));
@@ -521,8 +500,6 @@ public class ProtocolConverter {
             sub.onStompCommit(activemqTx);
         }
 
-        pedingAcks.clear();
-
         TransactionInfo tx = new TransactionInfo();
         tx.setConnectionId(connectionId);
         tx.setTransactionId(activemqTx);
@@ -552,8 +529,6 @@ public class ProtocolConverter {
             }
         }
 
-        pedingAcks.clear();
-
         TransactionInfo tx = new TransactionInfo();
         tx.setConnectionId(connectionId);
         tx.setTransactionId(activemqTx);
@@ -572,6 +547,10 @@ public class ProtocolConverter {
 
         if (!this.version.equals(Stomp.V1_0) && subscriptionId == null) {
             throw new ProtocolException("SUBSCRIBE received without a subscription id!");
+        }
+
+        if (destination == null || "".equals(destination)) {
+            throw new ProtocolException("Invalid empty or 'null' Destination header");
         }
 
         final ActiveMQDestination actualDest = translator.convertDestination(this, destination, true);
@@ -611,12 +590,13 @@ public class ProtocolConverter {
         }
 
         consumerInfo.setDestination(actualDest);
+        consumerInfo.setDispatchAsync(true);
 
         StompSubscription stompSubscription;
         if (!consumerInfo.isBrowser()) {
-            stompSubscription = new StompSubscription(this, subscriptionId, consumerInfo, headers.get(Stomp.Headers.TRANSFORMATION));
+            stompSubscription = new StompSubscription(this, subscriptionId, consumerInfo, headers.get(Stomp.Headers.TRANSFORMATION), pendingAcksTracker);
         } else {
-            stompSubscription = new StompQueueBrowserSubscription(this, subscriptionId, consumerInfo, headers.get(Stomp.Headers.TRANSFORMATION));
+            stompSubscription = new StompQueueBrowserSubscription(this, subscriptionId, consumerInfo, headers.get(Stomp.Headers.TRANSFORMATION), pendingAcksTracker);
         }
         stompSubscription.setDestination(actualDest);
 
@@ -799,7 +779,7 @@ public class ProtocolConverter {
                         }
 
                         connected.set(true);
-                        HashMap<String, String> responseHeaders = new HashMap<String, String>();
+                        HashMap<String, String> responseHeaders = new HashMap<>();
 
                         responseHeaders.put(Stomp.Headers.Connected.SESSION, connectionInfo.getClientId());
                         String requestId = headers.get(Stomp.Headers.Connect.REQUEST_ID);
@@ -835,6 +815,7 @@ public class ProtocolConverter {
 
     protected void onStompDisconnect(StompFrame command) throws ProtocolException {
         if (connected.get()) {
+            LOG.trace("Connection closed with {} pending ACKs still being tracked.", pendingAcks.size());
             sendToActiveMQ(connectionInfo.createRemoveCommand(), createResponseHandler(command));
             sendToActiveMQ(new ShutdownInfo(), createResponseHandler(command));
             connected.set(false);
@@ -870,19 +851,7 @@ public class ProtocolConverter {
             MessageDispatch md = (MessageDispatch)command;
             StompSubscription sub = subscriptionsByConsumerId.get(md.getConsumerId());
             if (sub != null) {
-                String ackId = null;
-                if (version.equals(Stomp.V1_2) && sub.getAckMode() != Stomp.Headers.Subscribe.AckModeValues.AUTO && md.getMessage() != null) {
-                    AckEntry pendingAck = new AckEntry(md.getMessage().getMessageId().toString(), sub);
-                    ackId = this.ACK_ID_GENERATOR.generateId();
-                    this.pedingAcks.put(ackId, pendingAck);
-                }
-                try {
-                    sub.onMessageDispatch(md, ackId);
-                } catch (Exception ex) {
-                    if (ackId != null) {
-                        this.pedingAcks.remove(ackId);
-                    }
-                }
+                sub.onMessageDispatch(md);
             }
         } else if (command.getDataStructureType() == CommandTypes.KEEP_ALIVE_INFO) {
             stompTransport.sendToStomp(ping);
@@ -1029,6 +998,10 @@ public class ProtocolConverter {
                     case Stomp.Commands.DISCONNECT:
                         result = action;
                         break;
+                    case Stomp.Commands.SUBSCRIBE_PREFIX:
+                        result = Stomp.Commands.SUBSCRIBE;
+                    case Stomp.Commands.UNSUBSCRIBE_PREFIX:
+                        result = Stomp.Commands.UNSUBSCRIBE;
                     default:
                         break;
                 }
@@ -1036,5 +1009,17 @@ public class ProtocolConverter {
         }
 
         return result;
+    }
+
+    boolean isStomp10() {
+        return version.equals(Stomp.V1_0);
+    }
+
+    boolean isStomp11() {
+        return version.equals(Stomp.V1_1);
+    }
+
+    boolean isStomp12() {
+        return version.equals(Stomp.V1_2);
     }
 }

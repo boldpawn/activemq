@@ -182,7 +182,7 @@ public class QueueBrowsingTest {
 
     @Test
     public void testMemoryLimit() throws Exception {
-        broker.getSystemUsage().getMemoryUsage().setLimit(16 * 1024);
+        broker.getSystemUsage().getMemoryUsage().setLimit((maxPageSize + 10) * 4 * 1024);
 
         int messageToSend = 370;
 
@@ -200,6 +200,10 @@ public class QueueBrowsingTest {
         for( int i=0; i < messageToSend; i++ ) {
             producer.send(session.createTextMessage(data));
         }
+
+        //Consume one message to free memory and allow the cursor to pageIn messages
+        MessageConsumer consumer = session.createConsumer(queue);
+        consumer.receive(1000);
 
         QueueBrowser browser = session.createBrowser(queue);
         Enumeration<?> enumeration = browser.getEnumeration();
