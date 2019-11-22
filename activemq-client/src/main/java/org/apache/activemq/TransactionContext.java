@@ -327,7 +327,7 @@ public class TransactionContext implements XAResource {
             this.transactionId = null;
             // Notify the listener that the tx was committed back
             try {
-                this.connection.syncSendPacket(info);
+                this.connection.syncSendPacket(info, connection.getSendTimeout());
                 if (localTransactionEventListener != null) {
                     localTransactionEventListener.commitEvent();
                 }
@@ -466,7 +466,7 @@ public class TransactionContext implements XAResource {
             TransactionInfo info = new TransactionInfo(getConnectionId(), x, TransactionInfo.PREPARE);
 
             // Find out if the server wants to commit or rollback.
-            IntegerResponse response = (IntegerResponse)this.connection.syncSendPacket(info);
+            IntegerResponse response = (IntegerResponse)this.connection.syncSendPacket(info, connection.getSendTimeout());
             if (XAResource.XA_RDONLY == response.getResult()) {
                 // transaction stops now, may be syncs that need a callback
                 List<TransactionContext> l;
@@ -535,7 +535,7 @@ public class TransactionContext implements XAResource {
 
             // Let the server know that the tx is rollback.
             TransactionInfo info = new TransactionInfo(getConnectionId(), x, TransactionInfo.ROLLBACK);
-            this.connection.syncSendPacket(info);
+            this.connection.syncSendPacket(info, connection.getSendTimeout());
 
             List<TransactionContext> l;
             synchronized(ENDED_XA_TRANSACTION_CONTEXTS) {
@@ -582,7 +582,7 @@ public class TransactionContext implements XAResource {
             // Notify the server that the tx was committed back
             TransactionInfo info = new TransactionInfo(getConnectionId(), x, onePhase ? TransactionInfo.COMMIT_ONE_PHASE : TransactionInfo.COMMIT_TWO_PHASE);
 
-            this.connection.syncSendPacket(info);
+            this.connection.syncSendPacket(info, connection.getSendTimeout());
 
             List<TransactionContext> l;
             synchronized(ENDED_XA_TRANSACTION_CONTEXTS) {
@@ -644,7 +644,7 @@ public class TransactionContext implements XAResource {
 
         try {
             // Tell the server to forget the transaction.
-            this.connection.syncSendPacket(info);
+            this.connection.syncSendPacket(info, connection.getSendTimeout());
         } catch (JMSException e) {
             throw toXAException(e);
         }
@@ -684,7 +684,7 @@ public class TransactionContext implements XAResource {
                 this.connection.checkClosedOrFailed();
                 this.connection.ensureConnectionInfoSent();
 
-                DataArrayResponse receipt = (DataArrayResponse) this.connection.syncSendPacket(info);
+                DataArrayResponse receipt = (DataArrayResponse) this.connection.syncSendPacket(info, connection.getSendTimeout());
                 DataStructure[] data = receipt.getData();
                 if (data instanceof XATransactionId[]) {
                     answer = (XATransactionId[]) data;
@@ -748,7 +748,7 @@ public class TransactionContext implements XAResource {
             if (transactionId != null) {
                 TransactionInfo info = new TransactionInfo(getConnectionId(), transactionId, TransactionInfo.END);
                 try {
-                    this.connection.syncSendPacket(info);
+                    this.connection.syncSendPacket(info, connection.getSendTimeout());
                     LOG.debug("{} ended XA transaction {}", this, transactionId);
                 } catch (JMSException e) {
                     disassociate();
