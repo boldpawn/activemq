@@ -232,6 +232,8 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
             Object command = readCommand();
             doConsume(command);
         } catch (SocketTimeoutException e) {
+            LOG.warn("Rethrow SocketTimeoutException {}", e.getLocalizedMessage());
+            throw new IOException(e);
         } catch (InterruptedIOException e) {
         }
     }
